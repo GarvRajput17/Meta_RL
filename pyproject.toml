@@ -7,7 +7,7 @@ name = "open-supply-chain-env"
 version = "1.0.0"
 description = "A massive-scale disaster logistics simulation environment."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
     "openai>=1.0.0",
     "pydantic>=2.0.0",
@@ -15,8 +15,12 @@ dependencies = [
     "uvicorn>=0.20.0",
     "httpx>=0.24.0",
     "python-dotenv>=1.0.0",
-    "pyyaml>=6.0"
+    "pyyaml>=6.0",
+    "openenv-core>=0.2.0"
 ]
+
+[project.scripts]
+server = "server.app:start"
 
 [project.optional-dependencies]
 dev = [
