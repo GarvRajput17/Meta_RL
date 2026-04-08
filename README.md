@@ -1,3 +1,14 @@
+---
+title: Open Supply Chain Env
+emoji: 📦
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+tags:
+  - openenv
+---
+
 # OpenSupplyChainEnv
 
 Single-agent LLM-driven disaster resource allocation environment for the [Meta OpenEnv Hackathon](https://github.com/meta-pytorch/OpenEnv).
