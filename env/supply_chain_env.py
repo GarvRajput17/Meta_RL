@@ -77,6 +77,7 @@ class Observation(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid")
 
     cdc_inventory: int
+    periodic_supply_rate: int
     depot_inventories: dict[str, int]
     zone_demands: dict[str, int]
     road_status: dict[str, str]
@@ -564,6 +565,7 @@ class SupplyChainEnv:
         ]
         return Observation(
             cdc_inventory=self._cdc,
+            periodic_supply_rate=self._periodic_rate,
             depot_inventories=dict(self._depots),
             zone_demands=dict(self._demands),
             road_status=dict(self._roads),

@@ -74,8 +74,8 @@ The economy is balanced so that total supply roughly matches total demand (~1.0�
 | Task | Difficulty | Base Stock | Periodic | Resupply Events | Disruptions |
 |---|---|---|---|---|---|
 | `static-baseline` | Easy | 1500 | 250/step | — | None |
-| `demand-spike` | Medium | 1500 | 250/step | +500 (step 10), +400 (step 20) | zone3 demand spike steps 5–14 |
-| `cascading-failure` | Hard | 1800 | 280/step | +600 (step 15), +400 (step 22) | Road closure, demand spike, inventory cut |
+| `demand-spike` | Medium | 1400 | 170/step | +500 (step 10), +400 (step 20) | zone3 spike (4-12), depotA->zone2 closure (6-14), zone5 spike (18-24) |
+| `cascading-failure` | Hard | 1200 | 200/step | +500 (step 15), +400 (step 22) | Multi-phase: zone/CDC road closures, dual demand waves, two CDC cuts, depotC blackout |
 
 The observation includes `pending_resupplies` so the agent can plan around upcoming deliveries.
 

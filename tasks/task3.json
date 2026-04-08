@@ -1,7 +1,7 @@
 {
     "task_name": "cascading-failure",
-    "cdc_initial_inventory": 1800,
-    "periodic_supply_rate": 280,
+    "cdc_initial_inventory": 1200,
+    "periodic_supply_rate": 200,
     "depot_initial_inventories": {
         "depotA": 200,
         "depotB": 200,
@@ -16,36 +16,22 @@
         "zone6": 45
     },
     "disruption_schedule": [
-        {
-            "type": "road_closure",
-            "step": 3,
-            "edge": "CDC->depotB"
-        },
-        {
-            "type": "demand_change",
-            "step": 7,
-            "zone": "zone4",
-            "units": 100
-        },
-        {
-            "type": "road_open",
-            "step": 11,
-            "edge": "CDC->depotB"
-        },
-        {
-            "type": "cdc_inventory_cut",
-            "step": 12,
-            "factor": 0.5
-        },
-        {
-            "type": "cdc_resupply",
-            "step": 15,
-            "units": 600
-        },
-        {
-            "type": "cdc_resupply",
-            "step": 22,
-            "units": 400
-        }
+        {"type": "road_closure", "step": 2, "edge": "depotA->zone1"},
+        {"type": "road_closure", "step": 3, "edge": "CDC->depotB"},
+        {"type": "demand_change", "step": 5, "zone": "zone3", "units": 180},
+        {"type": "demand_change", "step": 5, "zone": "zone6", "units": 120},
+        {"type": "cdc_inventory_cut", "step": 8, "factor": 0.5},
+        {"type": "road_open", "step": 10, "edge": "depotA->zone1"},
+        {"type": "road_open", "step": 11, "edge": "CDC->depotB"},
+        {"type": "demand_change", "step": 13, "zone": "zone4", "units": 150},
+        {"type": "demand_change", "step": 13, "zone": "zone3", "units": 70},
+        {"type": "cdc_resupply", "step": 15, "units": 500},
+        {"type": "road_closure", "step": 18, "edge": "CDC->depotC"},
+        {"type": "demand_change", "step": 20, "zone": "zone4", "units": 30},
+        {"type": "demand_change", "step": 20, "zone": "zone6", "units": 45},
+        {"type": "road_open", "step": 22, "edge": "CDC->depotC"},
+        {"type": "cdc_resupply", "step": 22, "units": 400},
+        {"type": "cdc_inventory_cut", "step": 25, "factor": 0.7},
+        {"type": "demand_change", "step": 27, "zone": "zone1", "units": 130}
     ]
 }

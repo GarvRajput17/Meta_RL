@@ -119,6 +119,10 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
         d for d in DEPOTS if obs.road_status.get(f"CDC->{d}") == "closed"
     ]
     open_depots = [d for d in DEPOTS if d not in closed_depots]
+    closed_zone_roads = [
+        edge for edge, st in obs.road_status.items()
+        if st == "closed" and not edge.startswith("CDC->")
+    ]
 
     # Per-depot demand summary
     depot_summaries: list[str] = []
@@ -136,11 +140,21 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
     remaining_steps = MAX_STEPS - obs.step
     budget_hint = obs.cdc_inventory // remaining_steps if remaining_steps > 0 else 0
 
+    pending = obs.pending_resupplies
+    if pending:
+        resupply_lines = ", ".join(
+            f"step {r['step']}: +{r['units']}" for r in pending
+        )
+    else:
+        resupply_lines = "none"
+
     msg = (
         f"STEP {obs.step} / 30  |  Task: {task_name}\n\n"
 
         f"== SUPPLY ==\n"
         f"- CDC inventory: {obs.cdc_inventory}\n"
+        f"- Periodic pipeline: +{obs.periodic_supply_rate} units arrive each step\n"
+        f"- Upcoming one-time deliveries: {resupply_lines}\n"
         f"- Remaining steps: {remaining_steps}\n"
         f"- Suggested total budget this step: ~{budget_hint}\n\n"
 
@@ -151,12 +165,14 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
         f"- Each depot allocation must be one of: {sorted(VALID_ALLOC)}\n"
         f"- Sum of all allocations must be ≤ {obs.cdc_inventory} (CDC inventory)\n"
         f"- Closed-road depots MUST get 0: {closed_depots if closed_depots else 'none currently'}\n"
+        f"- Closed depot→zone roads (zones get 0 from that depot): {closed_zone_roads if closed_zone_roads else 'none currently'}\n"
         f"- Each depot allocation must fit within its headroom (capacity {list(DEPOT_CAPACITY.values())[0]} - current inventory)\n\n"
 
         f"== STRATEGY TIPS ==\n"
         f"- Depots auto-distribute to their zones. You only control CDC→depot.\n"
         f"- Prioritise depots whose zones have highest total demand.\n"
-        f"- Spread CDC across all 30 steps — don't spend it all early.\n\n"
+        f"- Supply is tight. Plan ahead — budget ≈ demand + small buffer.\n"
+        f"- Upcoming deliveries replenish CDC; pre-position before surges.\n\n"
     )
 
     # Few-shot example for non-easy tasks

@@ -69,7 +69,7 @@ def _write_task(
 # 1. reset() returns valid Observation for all 3 tasks
 # =========================================================================
 
-_TASK_INITIAL_CDC = {"task1": 1500, "task2": 1500, "task3": 1800}
+_TASK_INITIAL_CDC = {"task1": 1500, "task2": 1400, "task3": 1200}
 
 
 @pytest.mark.parametrize("task", ["task1", "task2", "task3"])
@@ -197,27 +197,51 @@ def test_task3_road_closure_step3() -> None:
 
 
 # =========================================================================
-# 10. task2 step 5 sets zone3 demand to 150
+# 10. task2 step 4 sets zone3 demand to 160
 # =========================================================================
 
-def test_task2_demand_spike_step5() -> None:
+def test_task2_demand_spike_step4() -> None:
     env = SupplyChainEnv(tasks_dir="tasks")
     env.reset("task2")
-    for _ in range(5):
+    for _ in range(4):
         env.step(ZERO)
-    assert env.state()["zone_demands"]["zone3"] == 150
+    assert env.state()["zone_demands"]["zone3"] == 160
 
 
 # =========================================================================
-# 11. task2 step 15 resets zone3 demand to 50
+# 11. task2 step 12 resets zone3 demand to 70
 # =========================================================================
 
-def test_task2_demand_reset_step15() -> None:
+def test_task2_demand_reset_step12() -> None:
     env = SupplyChainEnv(tasks_dir="tasks")
     env.reset("task2")
-    for _ in range(15):
+    for _ in range(12):
         env.step(ZERO)
-    assert env.state()["zone_demands"]["zone3"] == 50
+    assert env.state()["zone_demands"]["zone3"] == 70
+
+
+# =========================================================================
+# 11b. task2 step 6 closes depotA->zone2 road
+# =========================================================================
+
+def test_task2_zone_road_closure_step6() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task2")
+    for _ in range(6):
+        env.step(ZERO)
+    assert env.state()["road_status"]["depotA->zone2"] == "closed"
+
+
+# =========================================================================
+# 11c. task2 step 14 reopens depotA->zone2 road
+# =========================================================================
+
+def test_task2_zone_road_reopen_step14() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task2")
+    for _ in range(14):
+        env.step(ZERO)
+    assert env.state()["road_status"]["depotA->zone2"] == "open"
 
 
 # =========================================================================
@@ -315,8 +339,8 @@ def test_task2_cdc_resupply_step20() -> None:
     env.reset("task2")
     for _ in range(20):
         env.step(ZERO)
-    # CDC=1500, periodic=250 at steps 1-20 (+5000), resupply +500 at step 10, +400 at step 20
-    assert env.state()["cdc_inventory"] == 1500 + 250 * 20 + 500 + 400  # 7400
+    # CDC=1400, periodic=170 at steps 1-20 (+3400), resupply +500 at step 10, +400 at step 20
+    assert env.state()["cdc_inventory"] == 1400 + 170 * 20 + 500 + 400  # 5700
 
 
 # =========================================================================
@@ -328,10 +352,14 @@ def test_task3_cdc_resupply_step18() -> None:
     env.reset("task3")
     for _ in range(18):
         env.step(ZERO)
-    # CDC=1800, periodic=280/step. At step 12: periodic then cut(0.5).
-    # Before step 12: 1800 + 280*11 = 4880. Phase0: +280=5160. Cut: int(5160*0.5)=2580.
-    # Steps 13-14: +280*2 = 3140. Step 15: +280+600 = 4020. Steps 16-18: +280*3 = 4860.
-    assert env.state()["cdc_inventory"] == 4860
+    # CDC=1200, periodic=200/step.
+    # Steps 1-7: +200*7=1400 → 2600
+    # Step 8: +200=2800, cut ×0.5 → int(2800*0.5)=1400
+    # Steps 9-14: +200*6=1200 → 2600
+    # Step 15: +200=2800, resupply +500 → 3300
+    # Steps 16-17: +200*2=400 → 3700
+    # Step 18: +200=3900 (CDC->depotC closes, no CDC effect with ZERO)
+    assert env.state()["cdc_inventory"] == 3900
 
 
 # =========================================================================
@@ -421,6 +449,73 @@ def test_pending_resupplies_future_only(tmp_path: Path) -> None:
     # Pending should only show step 5
     assert len(r.observation.pending_resupplies) == 1
     assert r.observation.pending_resupplies[0]["step"] == 5
+
+
+# =========================================================================
+# 15k. task3 step 2 closes depotA->zone1
+# =========================================================================
+
+def test_task3_zone_road_closure_step2() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task3")
+    for _ in range(2):
+        env.step(ZERO)
+    assert env.state()["road_status"]["depotA->zone1"] == "closed"
+
+
+# =========================================================================
+# 15l. task3 step 10 reopens depotA->zone1
+# =========================================================================
+
+def test_task3_zone_road_reopen_step10() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task3")
+    for _ in range(10):
+        env.step(ZERO)
+    assert env.state()["road_status"]["depotA->zone1"] == "open"
+
+
+# =========================================================================
+# 15m. task3 step 18 closes CDC->depotC
+# =========================================================================
+
+def test_task3_depotc_closure_step18() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task3")
+    for _ in range(18):
+        env.step(ZERO)
+    assert env.state()["road_status"]["CDC->depotC"] == "closed"
+
+
+# =========================================================================
+# 15n. task3 step 22 reopens CDC->depotC
+# =========================================================================
+
+def test_task3_depotc_reopen_step22() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task3")
+    for _ in range(22):
+        env.step(ZERO)
+    assert env.state()["road_status"]["CDC->depotC"] == "open"
+
+
+# =========================================================================
+# 15o. task3 double CDC cuts at step 8 and step 25
+# =========================================================================
+
+def test_task3_double_cdc_cut() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task3")
+    for _ in range(25):
+        env.step(ZERO)
+    # CDC=1200, periodic=200/step.
+    # Steps 1-7: 1200+1400=2600. Step 8: +200=2800, cut×0.5=1400.
+    # Steps 9-14: +200*6=1200 → 2600. Step 15: +200+500=3300.
+    # Steps 16-21: +200*6=1200 → 4500.
+    # Step 22: +200=4700, resupply+400=5100 (depotC reopens).
+    # Steps 23-24: +200*2=400 → 5500.
+    # Step 25: +200=5700, cut×0.7=int(5700*0.7)=3989 (float rounding).
+    assert env.state()["cdc_inventory"] == 3989
 
 
 # =========================================================================
@@ -553,6 +648,7 @@ def test_fastapi_reset(api_client) -> None:
     assert body["cdc_inventory"] == 1500
     assert body["step"] == 0
     assert "pending_resupplies" in body
+    assert "periodic_supply_rate" in body
 
 
 def test_fastapi_step(api_client) -> None:

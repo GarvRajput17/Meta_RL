@@ -8,6 +8,7 @@ from typing import Callable
 
 from env.supply_chain_env import (
     Action,
+    DEPOT_CAPACITY,
     DEPOTS,
     DEPOT_TO_ZONES,
     DepotAllocations,
@@ -57,16 +58,17 @@ def proportional_heuristic_action(observation: Observation, env_state: dict) -> 
         for d in DEPOTS:
             scaled[d] = raw_targets[d] * (cdc / total_target)
 
-    # Clamp each to nearest valid value not exceeding the scaled target,
-    # then greedily ensure total does not exceed CDC
+    depot_inv = observation.depot_inventories
+
     allocs: dict[str, int] = {}
     budget = cdc
     for depot in DEPOTS:
         if raw_targets[depot] == 0:
             allocs[depot] = 0
             continue
+        headroom = DEPOT_CAPACITY[depot] - depot_inv.get(depot, 0)
         clamped = _clamp_to_valid(int(scaled[depot]))
-        clamped = min(clamped, budget)
+        clamped = min(clamped, budget, headroom)
         clamped = _clamp_to_valid(clamped)
         allocs[depot] = clamped
         budget -= clamped

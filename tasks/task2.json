@@ -1,7 +1,7 @@
 {
     "task_name": "demand-spike",
-    "cdc_initial_inventory": 1500,
-    "periodic_supply_rate": 250,
+    "cdc_initial_inventory": 1400,
+    "periodic_supply_rate": 170,
     "depot_initial_inventories": {
         "depotA": 200,
         "depotB": 200,
@@ -16,27 +16,13 @@
         "zone6": 45
     },
     "disruption_schedule": [
-        {
-            "type": "demand_change",
-            "step": 5,
-            "zone": "zone3",
-            "units": 150
-        },
-        {
-            "type": "cdc_resupply",
-            "step": 10,
-            "units": 500
-        },
-        {
-            "type": "demand_change",
-            "step": 15,
-            "zone": "zone3",
-            "units": 50
-        },
-        {
-            "type": "cdc_resupply",
-            "step": 20,
-            "units": 400
-        }
+        {"type": "demand_change", "step": 4, "zone": "zone3", "units": 160},
+        {"type": "road_closure", "step": 6, "edge": "depotA->zone2"},
+        {"type": "cdc_resupply", "step": 10, "units": 500},
+        {"type": "demand_change", "step": 12, "zone": "zone3", "units": 70},
+        {"type": "road_open", "step": 14, "edge": "depotA->zone2"},
+        {"type": "demand_change", "step": 18, "zone": "zone5", "units": 120},
+        {"type": "cdc_resupply", "step": 20, "units": 400},
+        {"type": "demand_change", "step": 24, "zone": "zone5", "units": 55}
     ]
 }
