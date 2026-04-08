@@ -12,9 +12,10 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 from env.supply_chain_env import (
     Action,
@@ -22,10 +23,12 @@ from env.supply_chain_env import (
     DEPOTS,
     DEPOT_TO_ZONES,
     DepotAllocations,
+    EDGES,
     MAX_STEPS,
     Observation,
     SupplyChainEnv,
     VALID_ALLOC,
+    ZONES,
 )
 from graders.graders import compute_normalised_score
 
@@ -60,22 +63,21 @@ SORTED_ALLOC = sorted(VALID_ALLOC)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
-    "You are a disaster logistics coordinator optimising supply allocation.\n"
-    "Rules:\n"
-    "- Allocate supplies from CDC to 3 depots each step. Depots auto-distribute to zones.\n"
-    "- Goal: MINIMISE unmet demand. Reward = -unmet/total_demand + 0.05 per fully-satisfied zone.\n"
-    "- CRITICAL: Match allocations to depot demand. If depotB has 100 demand and depotA has 100, they need similar allocations.\n"
-    "- If a road is closed, that depot MUST get 0.\n"
-    "- React IMMEDIATELY to demand changes — increase allocation to affected depots the same step.\n"
-    "- React IMMEDIATELY to road closures/openings — redistribute to open depots.\n"
-    "- A recommended allocation is provided each step. Follow it unless you have a strong reason to deviate.\n"
-    "- Output ONLY valid JSON. No explanation, no markdown, no extra text."
+    "You are an expert disaster logistics AI. Your ONLY job: allocate supplies to minimize unmet demand.\n\n"
+    "ABSOLUTE RULES:\n"
+    "1. If a depot's road is CLOSED, allocate EXACTLY 0 to it. No exceptions.\n"
+    "2. ALWAYS follow the recommended allocation unless a road status forces a change.\n"
+    "3. NEVER split evenly (e.g. 100/100/100). Allocate PROPORTIONALLY to each depot's demand.\n"
+    "4. When demands change or roads close/open, IMMEDIATELY adjust your allocation that same step.\n"
+    "5. If your last reward was negative, your allocation was WRONG. Change it NOW.\n\n"
+    "REWARD: -unmet/total_demand + 0.05 per fully-satisfied zone. Maximize by matching supply to demand.\n\n"
+    "Output ONLY valid JSON: {\"allocations\":{\"depotA\":<int>,\"depotB\":<int>,\"depotC\":<int>}}\n"
+    "Values must be in {0, 50, 100, 200, 400}. Sum must not exceed CDC inventory."
 )
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 
 def _clamp_down(value: int) -> int:
     """Largest element of VALID_ALLOC that does not exceed *value*."""
@@ -185,6 +187,8 @@ def _build_user_message(
     observation: Observation,
     task_name: str,
     reward_history: list[float] | None = None,
+    action_history: list[dict[str, int]] | None = None,
+    prev_obs: Observation | None = None,
 ) -> str:
     """Construct the user prompt including observation, constraints, and recommendation."""
     obs = observation
@@ -227,14 +231,42 @@ def _build_user_message(
 
     msg = f"STEP {obs.step} / 30  |  Task: {task_name}\n\n"
 
-    # Show recent reward feedback if available
-    if reward_history:
-        recent = reward_history[-3:]
-        trend = ", ".join(f"{r:.2f}" for r in recent)
-        msg += f"== RECENT REWARDS == {trend}\n"
-        if any(r < 0 for r in recent):
-            msg += "WARNING: Negative rewards indicate unmet demand. Increase allocations!\n"
+    # Change detection: what changed since last step
+    if prev_obs is not None:
+        changes: list[str] = []
+        for edge in EDGES:
+            old_st = prev_obs.road_status.get(edge)
+            new_st = obs.road_status.get(edge)
+            if old_st != new_st:
+                changes.append(f"  ROAD {edge}: {old_st} -> {new_st}")
+        for zone in ZONES:
+            old_d = prev_obs.zone_demands.get(zone, 0)
+            new_d = obs.zone_demands.get(zone, 0)
+            if old_d != new_d:
+                changes.append(f"  DEMAND {zone}: {old_d} -> {new_d}")
+        if changes:
+            msg += "== CHANGES THIS STEP ==\n"
+            msg += "\n".join(changes) + "\n"
+            msg += "REACT TO THESE CHANGES IMMEDIATELY!\n\n"
+
+    # Show last action feedback
+    if action_history and reward_history:
+        last = action_history[-1]
+        msg += (
+            f"== YOUR LAST ACTION == depotA={last['depotA']}, "
+            f"depotB={last['depotB']}, depotC={last['depotC']}\n"
+            f"Result: reward={reward_history[-1]:.2f}\n"
+        )
+        if reward_history[-1] < 0:
+            msg += "YOUR ALLOCATION WAS BAD. Follow the recommendation below!\n"
         msg += "\n"
+
+    # Show full reward history
+    if reward_history:
+        all_rewards = ", ".join(f"{r:.2f}" for r in reward_history)
+        avg = sum(reward_history) / len(reward_history)
+        msg += f"== REWARD HISTORY ({len(reward_history)} steps) == {all_rewards}\n"
+        msg += f"Average: {avg:.3f} | Latest: {reward_history[-1]:.2f}\n\n"
 
     msg += (
         f"== SUPPLY ==\n"
@@ -254,7 +286,7 @@ def _build_user_message(
         f"- Each allocation ≤ depot headroom\n\n"
 
         f'== RECOMMENDED == {{"allocations":{{"depotA":{rec["depotA"]},"depotB":{rec["depotB"]},"depotC":{rec["depotC"]}}}}}\n'
-        f"Use this unless you have a specific reason to deviate.\n\n"
+        f"FOLLOW THIS RECOMMENDATION. Only deviate if a constraint forces it.\n\n"
 
         f"== RESPONSE (JSON only) ==\n"
         f'{{"allocations":{{"depotA":<int>,"depotB":<int>,"depotC":<int>}}}}'
@@ -292,21 +324,35 @@ def _call_llm(
     observation: Observation,
     task_name: str,
     reward_history: list[float] | None = None,
+    action_history: list[dict[str, int]] | None = None,
+    prev_obs: Observation | None = None,
 ) -> Action:
     """Call the LLM and parse its response into an Action, with fallback."""
     try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": _build_user_message(observation, task_name, reward_history),
-                },
-            ],
-            max_tokens=128,
-            temperature=0,
-        )
+        for _attempt in range(5):
+            try:
+                response = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": _build_user_message(
+                                observation, task_name, reward_history,
+                                action_history, prev_obs,
+                            ),
+                        },
+                    ],
+                    max_tokens=128,
+                    temperature=0,
+                )
+                break
+            except RateLimitError as rle:
+                wait = 10 * (_attempt + 1)
+                print(f"[DEBUG] Rate limited, waiting {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+        else:
+            raise Exception("Rate limit exceeded after 5 retries")
         raw = response.choices[0].message.content.strip()
 
         # Strip markdown fences if present
@@ -322,7 +368,9 @@ def _call_llm(
             "depotC": int(data["allocations"]["depotC"]),
         }
         return _sanitize_action(observation, raw_allocs)
-    except Exception:
+    except Exception as exc:
+        # Log to stderr so it doesn't pollute [START]/[STEP]/[END] stdout
+        print(f"[DEBUG] LLM call failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         # Fallback: use the recommendation directly
         rec = _compute_recommended_allocation(observation)
         return _sanitize_action(observation, rec)
@@ -351,6 +399,7 @@ def run_episode(task: str) -> None:
     task_file = TASK_FILE_MAP[task]
     env = SupplyChainEnv(tasks_dir="tasks")
     rewards: list[float] = []
+    action_history: list[dict[str, int]] = []
     success = True
     steps_taken = 0
 
@@ -359,11 +408,19 @@ def run_episode(task: str) -> None:
         print(f"[START] task={task} env=open-supply-chain-env model={MODEL_NAME}")
 
         done = False
+        prev_obs: Observation | None = None
         for step_num in range(1, MAX_STEPS + 1):
             if done:
                 break
 
-            action = _call_llm(obs, task, rewards if rewards else None)
+            action = _call_llm(
+                obs, task,
+                rewards if rewards else None,
+                action_history if action_history else None,
+                prev_obs,
+            )
+            action_history.append(action.allocations.model_dump())
+            prev_obs = obs
             result = env.step(action)
 
             obs = result.observation
@@ -392,6 +449,7 @@ def run_episode(task: str) -> None:
         print(
             f"[END] success={'true' if success else 'false'} "
             f"steps={steps_taken} "
+            f"score={score:.3f} "
             f"rewards={rewards_str}"
         )
 

@@ -15,6 +15,8 @@
         "zone5": 55,
         "zone6": 45
     },
+    "demand_noise_std": 5.0,
+    "demand_noise_seed": 42,
     "disruption_schedule": [
         {"type": "demand_change", "step": 4, "zone": "zone3", "units": 160},
         {"type": "road_closure", "step": 6, "edge": "depotA->zone2"},

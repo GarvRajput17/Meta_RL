@@ -51,6 +51,9 @@ def _write_task(
     *,
     cdc: int = 2000,
     periodic: int = 0,
+    noise_std: float = 0.0,
+    noise_seed: int | None = None,
+    demands: dict[str, int] | None = None,
 ) -> str:
     """Write a minimal valid task JSON into *tmp_path* and return the dir."""
     data = {
@@ -58,9 +61,13 @@ def _write_task(
         "cdc_initial_inventory": cdc,
         "periodic_supply_rate": periodic,
         "depot_initial_inventories": {"depotA": 200, "depotB": 200, "depotC": 200},
-        "base_zone_demands": {f"zone{i}": 50 for i in range(1, 7)},
+        "base_zone_demands": demands or {f"zone{i}": 50 for i in range(1, 7)},
         "disruption_schedule": schedule,
     }
+    if noise_std > 0:
+        data["demand_noise_std"] = noise_std
+    if noise_seed is not None:
+        data["demand_noise_seed"] = noise_seed
     (tmp_path / f"{name}.json").write_text(json.dumps(data))
     return str(tmp_path)
 
@@ -200,9 +207,17 @@ def test_task3_road_closure_step3() -> None:
 # 10. task2 step 4 sets zone3 demand to 160
 # =========================================================================
 
-def test_task2_demand_spike_step4() -> None:
-    env = SupplyChainEnv(tasks_dir="tasks")
-    env.reset("task2")
+def test_task2_demand_spike_step4(tmp_path: Path) -> None:
+    # Use synthetic task with same disruptions but no noise
+    schedule = [
+        {"type": "demand_change", "step": 4, "zone": "zone3", "units": 160},
+    ]
+    tasks_dir = _write_task(
+        tmp_path, "spike", schedule, cdc=1400, periodic=170,
+        demands={"zone1": 60, "zone2": 40, "zone3": 70, "zone4": 30, "zone5": 55, "zone6": 45},
+    )
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    env.reset("spike")
     for _ in range(4):
         env.step(ZERO)
     assert env.state()["zone_demands"]["zone3"] == 160
@@ -212,9 +227,17 @@ def test_task2_demand_spike_step4() -> None:
 # 11. task2 step 12 resets zone3 demand to 70
 # =========================================================================
 
-def test_task2_demand_reset_step12() -> None:
-    env = SupplyChainEnv(tasks_dir="tasks")
-    env.reset("task2")
+def test_task2_demand_reset_step12(tmp_path: Path) -> None:
+    schedule = [
+        {"type": "demand_change", "step": 4, "zone": "zone3", "units": 160},
+        {"type": "demand_change", "step": 12, "zone": "zone3", "units": 70},
+    ]
+    tasks_dir = _write_task(
+        tmp_path, "reset12", schedule, cdc=1400, periodic=170,
+        demands={"zone1": 60, "zone2": 40, "zone3": 70, "zone4": 30, "zone5": 55, "zone6": 45},
+    )
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    env.reset("reset12")
     for _ in range(12):
         env.step(ZERO)
     assert env.state()["zone_demands"]["zone3"] == 70
@@ -701,7 +724,7 @@ def test_inference_stdout_format(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(
         inference, "_call_llm",
-        lambda obs, task: inference._build_fallback_action(obs),
+        lambda obs, task, rewards=None, actions=None, prev=None: inference._build_fallback_action(obs),
     )
 
     inference.run_episode("static-baseline")
@@ -743,7 +766,7 @@ def test_inference_end_printed_on_exception(monkeypatch, capsys) -> None:
 
     monkeypatch.setattr(
         inference, "_call_llm",
-        lambda obs, task: inference._build_fallback_action(obs),
+        lambda obs, task, rewards=None, actions=None, prev=None: inference._build_fallback_action(obs),
     )
 
     call_count = 0
@@ -765,3 +788,137 @@ def test_inference_end_printed_on_exception(monkeypatch, capsys) -> None:
     end_line = lines[-1]
     assert end_line.startswith("[END] ")
     assert "success=false" in end_line
+
+
+# =========================================================================
+# 33. noise: zero std produces no demand change
+# =========================================================================
+
+def test_noise_zero_std_no_change(tmp_path: Path) -> None:
+    tasks_dir = _write_task(tmp_path, "nonoise", [], cdc=2000, periodic=0)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    obs = env.reset("nonoise")
+    # With noise_std=0 (default), demands stay at base
+    for z in ZONES:
+        assert obs.zone_demands[z] == 50
+
+
+# =========================================================================
+# 34. noise: seeded noise is deterministic across runs
+# =========================================================================
+
+def test_noise_seeded_deterministic(tmp_path: Path) -> None:
+    tasks_dir = _write_task(
+        tmp_path, "seeded", [], cdc=2000, periodic=0,
+        noise_std=20.0, noise_seed=99,
+    )
+    # Run 1
+    env1 = SupplyChainEnv(tasks_dir=tasks_dir)
+    obs1 = env1.reset("seeded")
+    demands1 = [obs1.zone_demands.copy()]
+    for _ in range(5):
+        r = env1.step(ZERO)
+        demands1.append(r.observation.zone_demands.copy())
+
+    # Run 2
+    env2 = SupplyChainEnv(tasks_dir=tasks_dir)
+    obs2 = env2.reset("seeded")
+    demands2 = [obs2.zone_demands.copy()]
+    for _ in range(5):
+        r = env2.step(ZERO)
+        demands2.append(r.observation.zone_demands.copy())
+
+    assert demands1 == demands2
+
+
+# =========================================================================
+# 35. noise: demands never go negative
+# =========================================================================
+
+def test_noise_non_negative_demands(tmp_path: Path) -> None:
+    tasks_dir = _write_task(
+        tmp_path, "bignoise", [], cdc=2000, periodic=0,
+        noise_std=1000.0, noise_seed=7,
+    )
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    obs = env.reset("bignoise")
+    for z in ZONES:
+        assert obs.zone_demands[z] >= 0
+    for _ in range(10):
+        r = env.step(ZERO)
+        for z in ZONES:
+            assert r.observation.zone_demands[z] >= 0
+
+
+# =========================================================================
+# 36. noise: noise actually changes demands from base
+# =========================================================================
+
+def test_noise_changes_demands(tmp_path: Path) -> None:
+    tasks_dir = _write_task(
+        tmp_path, "noisy", [], cdc=2000, periodic=0,
+        noise_std=50.0, noise_seed=7,
+    )
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    obs = env.reset("noisy")
+    # At least one zone should differ from the base of 50
+    any_changed = any(obs.zone_demands[z] != 50 for z in ZONES)
+    assert any_changed, "Noise should change at least one demand from base"
+
+
+# =========================================================================
+# 37. validate_task_file accepts noise fields
+# =========================================================================
+
+def test_validate_accepts_noise_fields(tmp_path: Path) -> None:
+    from env.supply_chain_env import validate_task_file
+    data = {
+        "task_name": "with-noise",
+        "cdc_initial_inventory": 2000,
+        "periodic_supply_rate": 0,
+        "depot_initial_inventories": {"depotA": 200, "depotB": 200, "depotC": 200},
+        "base_zone_demands": {f"zone{i}": 50 for i in range(1, 7)},
+        "disruption_schedule": [],
+        "demand_noise_std": 15.0,
+        "demand_noise_seed": 42,
+    }
+    p = tmp_path / "with-noise.json"
+    p.write_text(json.dumps(data))
+    validate_task_file(str(p))  # should not raise
+
+
+# =========================================================================
+# 38. validate_task_file rejects negative noise_std
+# =========================================================================
+
+def test_validate_rejects_bad_noise_std(tmp_path: Path) -> None:
+    from env.supply_chain_env import validate_task_file
+    data = {
+        "task_name": "bad-noise",
+        "cdc_initial_inventory": 2000,
+        "periodic_supply_rate": 0,
+        "depot_initial_inventories": {"depotA": 200, "depotB": 200, "depotC": 200},
+        "base_zone_demands": {f"zone{i}": 50 for i in range(1, 7)},
+        "disruption_schedule": [],
+        "demand_noise_std": -5.0,
+    }
+    p = tmp_path / "bad-noise.json"
+    p.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="non-negative"):
+        validate_task_file(str(p))
+
+
+# =========================================================================
+# 39. state() includes noise params
+# =========================================================================
+
+def test_state_includes_noise_params(tmp_path: Path) -> None:
+    tasks_dir = _write_task(
+        tmp_path, "statenoise", [], cdc=2000, periodic=0,
+        noise_std=10.0, noise_seed=42,
+    )
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    env.reset("statenoise")
+    s = env.state()
+    assert s["demand_noise_std"] == 10.0
+    assert s["demand_noise_seed"] == 42

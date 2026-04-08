@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import copy
 import json
+import random as _random
 from pathlib import Path
 from typing import Annotated, Any, Literal, Union
 
@@ -84,6 +85,7 @@ class Observation(BaseModel):
     step: int
     task_name: str
     pending_resupplies: list[dict[str, int]]
+    demand_noise_std: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +241,8 @@ class TaskConfig(BaseModel):
     depot_initial_inventories: dict[str, int]
     base_zone_demands: dict[str, int]
     disruption_schedule: list[TaskEvent]
+    demand_noise_std: float = 0.0
+    demand_noise_seed: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +256,11 @@ _REQUIRED_TOP_KEYS: set[str] = {
     "depot_initial_inventories",
     "base_zone_demands",
     "disruption_schedule",
+}
+
+_OPTIONAL_TOP_KEYS: set[str] = {
+    "demand_noise_std",
+    "demand_noise_seed",
 }
 
 _EVENT_REQUIRED_FIELDS: dict[str, set[str]] = {
@@ -277,7 +286,7 @@ def validate_task_file(path: str) -> None:
     if missing:
         raise ValueError(f"Missing top-level keys: {sorted(missing)}")
 
-    extra = data.keys() - _REQUIRED_TOP_KEYS
+    extra = data.keys() - _REQUIRED_TOP_KEYS - _OPTIONAL_TOP_KEYS
     if extra:
         raise ValueError(f"Unknown top-level keys: {sorted(extra)}")
 
@@ -307,6 +316,20 @@ def validate_task_file(path: str) -> None:
             f"base_zone_demands must have keys {ZONES}, "
             f"got {sorted(zone_keys)}"
         )
+
+    if "demand_noise_std" in data:
+        nstd = data["demand_noise_std"]
+        if not isinstance(nstd, (int, float)) or nstd < 0:
+            raise ValueError(
+                f"demand_noise_std must be a non-negative number, got {nstd!r}"
+            )
+
+    if "demand_noise_seed" in data:
+        nseed = data["demand_noise_seed"]
+        if not isinstance(nseed, int) or nseed < 0:
+            raise ValueError(
+                f"demand_noise_seed must be a non-negative int, got {nseed!r}"
+            )
 
     if not isinstance(data["disruption_schedule"], list):
         raise ValueError("disruption_schedule must be a list")
@@ -397,11 +420,15 @@ class SupplyChainEnv:
         self._periodic_rate: int = 0
         self._depots: dict[str, int] | None = None
         self._demands: dict[str, int] | None = None
+        self._base_demands: dict[str, int] | None = None  # pre-noise demands
         self._roads: dict[str, str] | None = None
         self._step: int | None = None
         self._task_name: str | None = None
         self._episode_rewards: list[float] | None = None
         self._schedule: list[dict[str, Any]] | None = None
+        self._noise_std: float = 0.0
+        self._noise_seed: int | None = None
+        self._noise_rng: _random.Random | None = None
 
     # ---- public API -------------------------------------------------------
 
@@ -418,10 +445,18 @@ class SupplyChainEnv:
         self._periodic_rate = data["periodic_supply_rate"]
         self._depots = {k: v for k, v in data["depot_initial_inventories"].items()}
         self._demands = {k: v for k, v in data["base_zone_demands"].items()}
+        self._base_demands = {k: v for k, v in data["base_zone_demands"].items()}
         self._roads = {e: "open" for e in EDGES}
         self._step = 0
         self._episode_rewards = []
         self._schedule = [dict(ev) for ev in data["disruption_schedule"]]
+
+        self._noise_std = data.get("demand_noise_std", 0.0)
+        self._noise_seed = data.get("demand_noise_seed", None)
+        if self._noise_std > 0:
+            self._noise_rng = _random.Random(self._noise_seed)
+        else:
+            self._noise_rng = None
 
         self._apply_disruptions(0)
         return self._build_obs()
@@ -507,6 +542,8 @@ class SupplyChainEnv:
                 "task_name": self._task_name,
                 "episode_rewards": self._episode_rewards,
                 "disruption_schedule": self._schedule,
+                "demand_noise_std": self._noise_std,
+                "demand_noise_seed": self._noise_seed,
             }
         )
 
@@ -544,7 +581,14 @@ class SupplyChainEnv:
         # Phase 3: demand changes (last in schedule order wins per zone)
         for ev in events:
             if ev["type"] == "demand_change":
+                self._base_demands[ev["zone"]] = ev["units"]
                 self._demands[ev["zone"]] = ev["units"]
+
+        # Phase 3.5: stochastic demand noise (applied fresh from base each step)
+        if self._noise_std > 0 and self._noise_rng is not None:
+            for zone in ZONES:
+                noise = self._noise_rng.gauss(0, self._noise_std)
+                self._demands[zone] = max(0, int(self._base_demands[zone] + noise))
 
         # Phase 4: CDC inventory cuts (compound in schedule order)
         for ev in events:
@@ -572,6 +616,7 @@ class SupplyChainEnv:
             step=self._step,
             task_name=self._task_name,
             pending_resupplies=pending,
+            demand_noise_std=self._noise_std,
         )
 
     def _invalid_result(self, error_msg: str) -> StepResult:
