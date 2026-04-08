@@ -78,7 +78,7 @@ def proportional_heuristic_action(observation: Observation, env_state: dict) -> 
 
 def compute_normalised_score(total_reward: float) -> float:
     """Normalise cumulative reward to [0, 1]."""
-    return round(max(0.0, min(1.0, 1 + total_reward / 5)), 4)
+    return round(max(0.001, min(0.999, 1 + total_reward / 5)), 4)
 
 
 def run_grader(
