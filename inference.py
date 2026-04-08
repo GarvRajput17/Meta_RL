@@ -34,8 +34,8 @@ from graders.graders import compute_normalised_score
 # Environment variables
 # ---------------------------------------------------------------------------
 
-API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME: str = os.getenv("MODEL_NAME", "gpt-4o-mini")
+API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
+MODEL_NAME: str = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
 HF_TOKEN: str | None = os.getenv("HF_TOKEN")
 
 if HF_TOKEN is None:
@@ -392,7 +392,6 @@ def run_episode(task: str) -> None:
         print(
             f"[END] success={'true' if success else 'false'} "
             f"steps={steps_taken} "
-            f"score={score:.3f} "
             f"rewards={rewards_str}"
         )
 
