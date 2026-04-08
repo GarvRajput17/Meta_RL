@@ -451,18 +451,20 @@ def run_episode(task: str) -> None:
         
         # Calculate raw score as per suggestion
         raw_score = sum(rewards) / len(rewards) if rewards else 0.0
-        score = max(0.01, min(raw_score, 0.99))
+        score = max(1e-6, min(raw_score, 1 - 1e-6))
         
         # Assign success based on the new threshold definition if it didn't crash
         if success:
             success = score >= SUCCESS_SCORE_THRESHOLD
             
-        rewards_str = ",".join(f"{safe_score(r):.2f}" for r in rewards)
+        rewards_str = ",".join(f"{r:.2f}" for r in rewards)
         
         print(
             f"[END] success={'true' if success else 'false'} "
             f"steps={steps_taken} "
-            f"rewards={rewards_str}"
+            f"score={score:.3f} "
+            f"rewards={rewards_str}",
+            flush=True,
         )
 
 
