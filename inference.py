@@ -58,9 +58,11 @@ SORTED_ALLOC = sorted(VALID_ALLOC)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
-    "You are a disaster logistics coordinator managing supply chain "
-    "resource allocation. Output ONLY valid JSON in the exact format "
-    "specified. No explanation, no markdown, no extra text."
+    "You are a disaster logistics coordinator. Your job:\n"
+    "- Allocate supplies from a Central Distribution Centre (CDC) to 3 depots.\n"
+    "- Each depot automatically distributes to its zones to meet demand.\n"
+    "- Your goal: minimise unmet demand across all zones every step.\n"
+    "- Output ONLY valid JSON. No explanation, no markdown, no extra text."
 )
 
 # ---------------------------------------------------------------------------
@@ -109,33 +111,71 @@ def _build_fallback_action(observation: Observation) -> Action:
 
 def _build_user_message(observation: Observation, task_name: str) -> str:
     """Construct the user prompt including observation and constraints."""
-    obs_dict = observation.model_dump()
-    obs_json = json.dumps(obs_dict, indent=2)
+    obs = observation
+    depot_inv = obs.depot_inventories
+    demands = obs.zone_demands
 
     closed_depots = [
-        d for d in DEPOTS
-        if observation.road_status.get(f"CDC->{d}") == "closed"
+        d for d in DEPOTS if obs.road_status.get(f"CDC->{d}") == "closed"
     ]
+    open_depots = [d for d in DEPOTS if d not in closed_depots]
 
-    msg = ""
+    # Per-depot demand summary
+    depot_summaries: list[str] = []
+    for depot in DEPOTS:
+        zones = DEPOT_TO_ZONES[depot]
+        zone_detail = ", ".join(f"{z}={demands[z]}" for z in zones)
+        total_d = sum(demands[z] for z in zones)
+        headroom = DEPOT_CAPACITY[depot] - depot_inv[depot]
+        status = "CLOSED" if depot in closed_depots else "open"
+        depot_summaries.append(
+            f"  - {depot} (road: {status}, inventory: {depot_inv[depot]}, "
+            f"headroom: {headroom}, zone demand: {zone_detail}, total: {total_d})"
+        )
+
+    pending = obs.pending_resupplies
+    if pending:
+        resupply_lines = "\n".join(
+            f"  - Step {r['step']}: +{r['units']} units" for r in pending
+        )
+    else:
+        resupply_lines = "  - none"
+
+    msg = (
+        f"STEP {obs.step} / 30  |  Task: {task_name}\n\n"
+
+        f"== SUPPLY ==\n"
+        f"- CDC inventory: {obs.cdc_inventory}\n"
+        f"- Periodic resupply: +250 units arrive each step automatically\n"
+        f"- Scheduled one-time deliveries:\n{resupply_lines}\n\n"
+
+        f"== DEPOTS ==\n"
+        + "\n".join(depot_summaries) + "\n\n"
+
+        f"== CONSTRAINTS (violating any → instant -5 penalty, step wasted) ==\n"
+        f"- Each depot allocation must be one of: {sorted(VALID_ALLOC)}\n"
+        f"- Sum of all allocations must be ≤ {obs.cdc_inventory} (CDC inventory)\n"
+        f"- Closed-road depots MUST get 0: {closed_depots if closed_depots else 'none currently'}\n"
+        f"- Each depot allocation must fit within its headroom (capacity {list(DEPOT_CAPACITY.values())[0]} - current inventory)\n\n"
+
+        f"== STRATEGY TIPS ==\n"
+        f"- Depots auto-distribute to their zones. You only control CDC→depot.\n"
+        f"- Prioritise depots whose zones have highest total demand.\n"
+        f"- Don't hoard CDC — unmet demand is penalised every step.\n"
+        f"- If a big resupply is coming soon, you can afford to spend more now.\n\n"
+    )
 
     # Few-shot example for non-easy tasks
     if task_name in ("demand-spike", "cascading-failure"):
         msg += (
-            'Example — CDC->depotB is closed:\n'
+            "== EXAMPLE (when CDC->depotB is closed) ==\n"
             '{"allocations":{"depotA":200,"depotB":0,"depotC":200}}\n\n'
         )
 
     msg += (
-        f"Current observation:\n{obs_json}\n\n"
-        f"Task: {task_name}\n"
-        f"Allowed allocation values per depot: {sorted(VALID_ALLOC)}\n"
-        f"Current CDC inventory: {observation.cdc_inventory}\n"
-        f"Depots with closed CDC roads: {closed_depots}\n\n"
-        "Respond with ONLY a JSON object in this format:\n"
-        '{"allocations":{"depotA":<int>,"depotB":<int>,"depotC":<int>}}\n'
-        "Total allocations must not exceed CDC inventory. "
-        "Closed-road depots must receive 0."
+        "== YOUR RESPONSE ==\n"
+        "Output ONLY this JSON (no text around it):\n"
+        '{"allocations":{"depotA":<int>,"depotB":<int>,"depotC":<int>}}'
     )
     return msg
 

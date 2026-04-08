@@ -44,11 +44,19 @@ ZERO = Action(allocations=DepotAllocations(depotA=0, depotB=0, depotC=0))
 # Helpers
 # =========================================================================
 
-def _write_task(tmp_path: Path, name: str, schedule: list) -> str:
+def _write_task(
+    tmp_path: Path,
+    name: str,
+    schedule: list,
+    *,
+    cdc: int = 2000,
+    periodic: int = 0,
+) -> str:
     """Write a minimal valid task JSON into *tmp_path* and return the dir."""
     data = {
         "task_name": name,
-        "cdc_initial_inventory": 2000,
+        "cdc_initial_inventory": cdc,
+        "periodic_supply_rate": periodic,
         "depot_initial_inventories": {"depotA": 200, "depotB": 200, "depotC": 200},
         "base_zone_demands": {f"zone{i}": 50 for i in range(1, 7)},
         "disruption_schedule": schedule,
@@ -61,16 +69,20 @@ def _write_task(tmp_path: Path, name: str, schedule: list) -> str:
 # 1. reset() returns valid Observation for all 3 tasks
 # =========================================================================
 
+_TASK_INITIAL_CDC = {"task1": 1500, "task2": 1500, "task3": 1800}
+
+
 @pytest.mark.parametrize("task", ["task1", "task2", "task3"])
 def test_reset_returns_observation(task: str) -> None:
     env = SupplyChainEnv(tasks_dir="tasks")
     obs = env.reset(task)
     assert isinstance(obs, Observation)
     assert obs.step == 0
-    assert obs.cdc_inventory == 2000
+    assert obs.cdc_inventory == _TASK_INITIAL_CDC[task]
     assert set(obs.depot_inventories.keys()) == set(DEPOTS)
     assert set(obs.zone_demands.keys()) == set(ZONES)
     assert set(obs.road_status.keys()) == set(EDGES)
+    assert isinstance(obs.pending_resupplies, list)
 
 
 # =========================================================================
@@ -90,9 +102,10 @@ def test_valid_step_returns_step_result() -> None:
 # 3. invalid action over CDC returns reward=-5.0 with error
 # =========================================================================
 
-def test_invalid_action_exceeds_cdc() -> None:
-    env = SupplyChainEnv(tasks_dir="tasks")
-    env.reset("task1")
+def test_invalid_action_exceeds_cdc(tmp_path: Path) -> None:
+    tasks_dir = _write_task(tmp_path, "drain", [], cdc=2000, periodic=0)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    env.reset("drain")
     # Step 0: (400,400,400)=1200, CDC 2000->800, depots 200+400=600->500 after distrib
     env.step(Action(allocations=DepotAllocations(depotA=400, depotB=400, depotC=400)))
     # Step 1: headroom=100, (100,100,100)=300, CDC 800->500
@@ -109,9 +122,10 @@ def test_invalid_action_exceeds_cdc() -> None:
 # 4. invalid action must not mutate state
 # =========================================================================
 
-def test_invalid_action_no_state_mutation() -> None:
-    env = SupplyChainEnv(tasks_dir="tasks")
-    env.reset("task1")
+def test_invalid_action_no_state_mutation(tmp_path: Path) -> None:
+    tasks_dir = _write_task(tmp_path, "drain", [], cdc=2000, periodic=0)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    env.reset("drain")
     env.step(Action(allocations=DepotAllocations(depotA=400, depotB=400, depotC=400)))
     env.step(Action(allocations=DepotAllocations(depotA=100, depotB=100, depotC=100)))
     env.step(Action(allocations=DepotAllocations(depotA=100, depotB=100, depotC=100)))
@@ -130,9 +144,10 @@ def test_invalid_action_no_state_mutation() -> None:
 # 5. invalid action must not advance step
 # =========================================================================
 
-def test_invalid_action_no_step_advance() -> None:
-    env = SupplyChainEnv(tasks_dir="tasks")
-    env.reset("task1")
+def test_invalid_action_no_step_advance(tmp_path: Path) -> None:
+    tasks_dir = _write_task(tmp_path, "drain", [], cdc=2000, periodic=0)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    env.reset("drain")
     env.step(Action(allocations=DepotAllocations(depotA=400, depotB=400, depotC=400)))
     env.step(Action(allocations=DepotAllocations(depotA=100, depotB=100, depotC=100)))
     env.step(Action(allocations=DepotAllocations(depotA=100, depotB=100, depotC=100)))
@@ -264,6 +279,151 @@ def test_same_step_cdc_cuts_compound(tmp_path: Path) -> None:
 
 
 # =========================================================================
+# 15b. cdc_resupply: Pydantic model validates correctly
+# =========================================================================
+
+def test_cdc_resupply_event_model() -> None:
+    from env.supply_chain_env import CdcResupplyEvent
+    ev = CdcResupplyEvent(type="cdc_resupply", step=5, units=300)
+    assert ev.units == 300
+    assert ev.step == 5
+    with pytest.raises(Exception):
+        CdcResupplyEvent(type="cdc_resupply", step=5, units=300, extra_field=1)
+
+
+# =========================================================================
+# 15c. cdc_resupply applies correctly via _apply_disruptions
+# =========================================================================
+
+def test_cdc_resupply_applies(tmp_path: Path) -> None:
+    schedule = [
+        {"type": "cdc_resupply", "step": 1, "units": 500},
+    ]
+    tasks_dir = _write_task(tmp_path, "resupply", schedule, cdc=2000, periodic=0)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    env.reset("resupply")
+    result = env.step(ZERO)
+    assert result.observation.cdc_inventory == 2000 + 500
+
+
+# =========================================================================
+# 15d. task2 step 20: cdc_resupply (with periodic supply)
+# =========================================================================
+
+def test_task2_cdc_resupply_step20() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task2")
+    for _ in range(20):
+        env.step(ZERO)
+    # CDC=1500, periodic=250 at steps 1-20 (+5000), resupply +500 at step 10, +400 at step 20
+    assert env.state()["cdc_inventory"] == 1500 + 250 * 20 + 500 + 400  # 7400
+
+
+# =========================================================================
+# 15e. task3 step 18: cdc_resupply (with periodic + cut)
+# =========================================================================
+
+def test_task3_cdc_resupply_step18() -> None:
+    env = SupplyChainEnv(tasks_dir="tasks")
+    env.reset("task3")
+    for _ in range(18):
+        env.step(ZERO)
+    # CDC=1800, periodic=280/step. At step 12: periodic then cut(0.5).
+    # Before step 12: 1800 + 280*11 = 4880. Phase0: +280=5160. Cut: int(5160*0.5)=2580.
+    # Steps 13-14: +280*2 = 3140. Step 15: +280+600 = 4020. Steps 16-18: +280*3 = 4860.
+    assert env.state()["cdc_inventory"] == 4860
+
+
+# =========================================================================
+# 15f. same-step: cut then resupply (Phase 4 before Phase 5)
+# =========================================================================
+
+def test_same_step_cut_then_resupply(tmp_path: Path) -> None:
+    schedule = [
+        {"type": "cdc_inventory_cut", "step": 0, "factor": 0.5},
+        {"type": "cdc_resupply", "step": 0, "units": 200},
+    ]
+    tasks_dir = _write_task(tmp_path, "cutresup", schedule, cdc=2000, periodic=0)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    obs = env.reset("cutresup")
+    # 2000 * 0.5 = 1000, then +200 = 1200
+    assert obs.cdc_inventory == 1200
+
+
+# =========================================================================
+# 15g. validate_task_file rejects invalid cdc_resupply units
+# =========================================================================
+
+def test_validator_rejects_bad_resupply_units(tmp_path: Path) -> None:
+    data = {
+        "task_name": "bad-resupply",
+        "cdc_initial_inventory": 2000,
+        "periodic_supply_rate": 0,
+        "depot_initial_inventories": {"depotA": 200, "depotB": 200, "depotC": 200},
+        "base_zone_demands": {f"zone{i}": 50 for i in range(1, 7)},
+        "disruption_schedule": [
+            {"type": "cdc_resupply", "step": 1, "units": -100},
+        ],
+    }
+    p = tmp_path / "bad-resupply.json"
+    p.write_text(json.dumps(data))
+    from env.supply_chain_env import validate_task_file
+    with pytest.raises(ValueError, match="positive int"):
+        validate_task_file(str(p))
+
+
+# =========================================================================
+# 15h. periodic_supply_rate adds to CDC each step from step 1 onward
+# =========================================================================
+
+def test_periodic_supply_fires_each_step(tmp_path: Path) -> None:
+    tasks_dir = _write_task(tmp_path, "periodic", [], cdc=1000, periodic=100)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    obs = env.reset("periodic")
+    assert obs.cdc_inventory == 1000  # no periodic at step 0
+    r1 = env.step(ZERO)
+    assert r1.observation.cdc_inventory == 1100  # step 1: +100
+    r2 = env.step(ZERO)
+    assert r2.observation.cdc_inventory == 1200  # step 2: +100
+
+
+# =========================================================================
+# 15i. periodic supply interacts correctly with cuts (Phase 0 before Phase 4)
+# =========================================================================
+
+def test_periodic_then_cut(tmp_path: Path) -> None:
+    schedule = [
+        {"type": "cdc_inventory_cut", "step": 1, "factor": 0.5},
+    ]
+    tasks_dir = _write_task(tmp_path, "pcut", schedule, cdc=1000, periodic=200)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    env.reset("pcut")
+    result = env.step(ZERO)
+    # Step 1: Phase 0 periodic +200 -> 1200, then Phase 4 cut *0.5 -> 600
+    assert result.observation.cdc_inventory == 600
+
+
+# =========================================================================
+# 15j. pending_resupplies only shows future events
+# =========================================================================
+
+def test_pending_resupplies_future_only(tmp_path: Path) -> None:
+    schedule = [
+        {"type": "cdc_resupply", "step": 1, "units": 100},
+        {"type": "cdc_resupply", "step": 5, "units": 200},
+    ]
+    tasks_dir = _write_task(tmp_path, "pendtest", schedule, cdc=1000, periodic=0)
+    env = SupplyChainEnv(tasks_dir=tasks_dir)
+    obs = env.reset("pendtest")
+    assert len(obs.pending_resupplies) == 2  # both at step 1 and 5 are future
+    r = env.step(ZERO)
+    # After step 0 → advance to step 1 → resupply at step 1 applied
+    # Pending should only show step 5
+    assert len(r.observation.pending_resupplies) == 1
+    assert r.observation.pending_resupplies[0]["step"] == 5
+
+
+# =========================================================================
 # 16. full episode runs 30 steps for all tasks
 # =========================================================================
 
@@ -390,8 +550,9 @@ def test_fastapi_reset(api_client) -> None:
     r = api_client.post("/reset", json={"task": "task1"})
     assert r.status_code == 200
     body = r.json()
-    assert body["cdc_inventory"] == 2000
+    assert body["cdc_inventory"] == 1500
     assert body["step"] == 0
+    assert "pending_resupplies" in body
 
 
 def test_fastapi_step(api_client) -> None:
@@ -412,6 +573,7 @@ def test_fastapi_state(api_client) -> None:
     assert r.status_code == 200
     body = r.json()
     assert "cdc_inventory" in body
+    assert "periodic_supply_rate" in body
     assert "disruption_schedule" in body
 
 

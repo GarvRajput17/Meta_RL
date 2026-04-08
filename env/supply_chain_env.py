@@ -82,6 +82,7 @@ class Observation(BaseModel):
     road_status: dict[str, str]
     step: int
     task_name: str
+    pending_resupplies: list[dict[str, int]]
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +132,6 @@ class Reward(BaseModel):
 
     value: float
     unmet_demand_penalty: float
-    depot_stockout_penalty: float
     exact_satisfaction_bonus: float
     zero_unmet_end_bonus: float
 
@@ -196,12 +196,23 @@ class InventoryCutEvent(BaseModel):
     factor: float
 
 
+class CdcResupplyEvent(BaseModel):
+    """Add *units* to CDC inventory at *step*."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    type: Literal["cdc_resupply"]
+    step: int
+    units: int
+
+
 TaskEvent = Annotated[
     Union[
         Annotated[RoadClosureEvent, Tag("road_closure")],
         Annotated[RoadOpenEvent, Tag("road_open")],
         Annotated[DemandChangeEvent, Tag("demand_change")],
         Annotated[InventoryCutEvent, Tag("cdc_inventory_cut")],
+        Annotated[CdcResupplyEvent, Tag("cdc_resupply")],
     ],
     Discriminator("type"),
 ]
@@ -223,6 +234,7 @@ class TaskConfig(BaseModel):
 
     task_name: str
     cdc_initial_inventory: int
+    periodic_supply_rate: int
     depot_initial_inventories: dict[str, int]
     base_zone_demands: dict[str, int]
     disruption_schedule: list[TaskEvent]
@@ -235,6 +247,7 @@ class TaskConfig(BaseModel):
 _REQUIRED_TOP_KEYS: set[str] = {
     "task_name",
     "cdc_initial_inventory",
+    "periodic_supply_rate",
     "depot_initial_inventories",
     "base_zone_demands",
     "disruption_schedule",
@@ -245,6 +258,7 @@ _EVENT_REQUIRED_FIELDS: dict[str, set[str]] = {
     "road_open": {"type", "step", "edge"},
     "demand_change": {"type", "step", "zone", "units"},
     "cdc_inventory_cut": {"type", "step", "factor"},
+    "cdc_resupply": {"type", "step", "units"},
 }
 
 _VALID_EDGES: set[str] = set(EDGES)
@@ -271,6 +285,9 @@ def validate_task_file(path: str) -> None:
 
     if not isinstance(data["cdc_initial_inventory"], int):
         raise ValueError("cdc_initial_inventory must be an int")
+
+    if not isinstance(data["periodic_supply_rate"], int) or data["periodic_supply_rate"] < 0:
+        raise ValueError("periodic_supply_rate must be a non-negative int")
 
     for key in ("depot_initial_inventories", "base_zone_demands"):
         if not isinstance(data[key], dict):
@@ -356,6 +373,15 @@ def validate_task_file(path: str) -> None:
                     f"factor must satisfy 0 < factor <= 1, got {fval!r}"
                 )
 
+        # Semantic: cdc_resupply units must be a positive int
+        if etype == "cdc_resupply":
+            uval = event["units"]
+            if not isinstance(uval, int) or uval <= 0:
+                raise ValueError(
+                    f"disruption_schedule[{i}] (type={etype}): "
+                    f"units must be a positive int, got {uval!r}"
+                )
+
 
 # ---------------------------------------------------------------------------
 # Environment
@@ -367,6 +393,7 @@ class SupplyChainEnv:
     def __init__(self, tasks_dir: str = "tasks") -> None:
         self._tasks_dir = tasks_dir
         self._cdc: int | None = None
+        self._periodic_rate: int = 0
         self._depots: dict[str, int] | None = None
         self._demands: dict[str, int] | None = None
         self._roads: dict[str, str] | None = None
@@ -387,6 +414,7 @@ class SupplyChainEnv:
 
         self._task_name = data["task_name"]
         self._cdc = data["cdc_initial_inventory"]
+        self._periodic_rate = data["periodic_supply_rate"]
         self._depots = {k: v for k, v in data["depot_initial_inventories"].items()}
         self._demands = {k: v for k, v in data["base_zone_demands"].items()}
         self._roads = {e: "open" for e in EDGES}
@@ -448,12 +476,6 @@ class SupplyChainEnv:
             1 for z in ZONES if units_received[z] == self._demands[z]
         )
 
-        for depot in DEPOTS:
-            depot_demand = sum(self._demands[z] for z in DEPOT_TO_ZONES[depot])
-            depot_sent = sum(units_received[z] for z in DEPOT_TO_ZONES[depot])
-            if self._depots[depot] == 0 and depot_sent < depot_demand:
-                r -= 2.0
-
         if self._step == MAX_STEPS - 1 and unmet == 0:
             r += 0.2
 
@@ -476,6 +498,7 @@ class SupplyChainEnv:
         return copy.deepcopy(
             {
                 "cdc_inventory": self._cdc,
+                "periodic_supply_rate": self._periodic_rate,
                 "depot_inventories": self._depots,
                 "zone_demands": self._demands,
                 "road_status": self._roads,
@@ -495,10 +518,17 @@ class SupplyChainEnv:
         """Apply all events scheduled at *step* in fixed phase order."""
         events = [ev for ev in self._schedule if ev["step"] == step]
 
-        known_types = {"road_closure", "road_open", "demand_change", "cdc_inventory_cut"}
+        known_types = {
+            "road_closure", "road_open", "demand_change",
+            "cdc_inventory_cut", "cdc_resupply",
+        }
         for ev in events:
             if ev["type"] not in known_types:
                 raise ValueError(f"Unknown disruption event type: {ev['type']!r}")
+
+        # Phase 0: periodic supply pipeline (kicks in from step 1 onward)
+        if step >= 1:
+            self._cdc += self._periodic_rate
 
         # Phase 1: road closures
         for ev in events:
@@ -520,8 +550,18 @@ class SupplyChainEnv:
             if ev["type"] == "cdc_inventory_cut":
                 self._cdc = int(self._cdc * ev["factor"])
 
+        # Phase 5: CDC resupply (additive, after cuts)
+        for ev in events:
+            if ev["type"] == "cdc_resupply":
+                self._cdc += ev["units"]
+
     def _build_obs(self) -> Observation:
         """Construct an observation from current state (all copies)."""
+        pending = [
+            {"step": ev["step"], "units": ev["units"]}
+            for ev in self._schedule
+            if ev["type"] == "cdc_resupply" and ev["step"] > self._step
+        ]
         return Observation(
             cdc_inventory=self._cdc,
             depot_inventories=dict(self._depots),
@@ -529,6 +569,7 @@ class SupplyChainEnv:
             road_status=dict(self._roads),
             step=self._step,
             task_name=self._task_name,
+            pending_resupplies=pending,
         )
 
     def _invalid_result(self, error_msg: str) -> StepResult:

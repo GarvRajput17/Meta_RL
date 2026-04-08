@@ -1,18 +1,19 @@
 {
     "task_name": "static-baseline",
-    "cdc_initial_inventory": 2000,
+    "cdc_initial_inventory": 1500,
+    "periodic_supply_rate": 250,
     "depot_initial_inventories": {
         "depotA": 200,
         "depotB": 200,
         "depotC": 200
     },
     "base_zone_demands": {
-        "zone1": 50,
-        "zone2": 50,
-        "zone3": 50,
-        "zone4": 50,
-        "zone5": 50,
-        "zone6": 50
+        "zone1": 60,
+        "zone2": 40,
+        "zone3": 70,
+        "zone4": 30,
+        "zone5": 55,
+        "zone6": 45
     },
     "disruption_schedule": []
 }

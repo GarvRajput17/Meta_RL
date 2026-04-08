@@ -46,32 +46,43 @@ Each edge can be `"open"` or `"closed"` at any step.
 
 ---
 
-## 4. Tasks
+## 4. Supply Economy
 
-| Task | Difficulty | Disruptions | Heuristic Score | RL Target |
-|---|---|---|---|---|
-| `static-baseline` | Easy | None — stationary demand (50/zone/step) | 0.00 | ≥ 0.50 |
-| `demand-spike` | Medium | Step 5: zone3 demand → 150; Step 15: zone3 → 50 | 0.00 | ≥ 0.40 |
-| `cascading-failure` | Hard | Step 3: CDC→depotB closed; Step 7: zone4 → 100; Step 11: road reopens; Step 12: CDC × 0.5 | 0.00 | ≥ 0.30 |
+The CDC is fed by three supply streams:
 
-> **Note**: The proportional heuristic scores 0.00 because total supply (CDC 2000 + depot 600) cannot cover total demand (300 × 30 = 9000). An intelligent agent must triage — prioritising high-demand zones, pre-positioning stock, and avoiding depot stockouts — to outperform the heuristic.
+| Source | Description |
+|---|---|
+| **Base stock** | `cdc_initial_inventory` — available from step 0 |
+| **Procurement pipeline** | `periodic_supply_rate` — units added to CDC every step (from step 1) |
+| **One-time deliveries** | `cdc_resupply` events — emergency reserves, refugee aid, international relief |
+
+The economy is balanced so that total supply roughly matches total demand (~1.0–1.05×), meaning a well-played episode can achieve near-zero unmet demand.
+
+## 5. Tasks
+
+| Task | Difficulty | Base Stock | Periodic | Resupply Events | Disruptions |
+|---|---|---|---|---|---|
+| `static-baseline` | Easy | 1500 | 250/step | — | None |
+| `demand-spike` | Medium | 1500 | 250/step | +500 (step 10), +400 (step 20) | zone3 demand spike steps 5–14 |
+| `cascading-failure` | Hard | 1800 | 280/step | +600 (step 15), +400 (step 22) | Road closure, demand spike, inventory cut |
+
+The observation includes `pending_resupplies` so the agent can plan around upcoming deliveries.
 
 ---
 
-## 5. Reward Function
+## 6. Reward Function
 
 Per-step reward computed **after** allocation and distribution:
 
 ```
 r  = −(unmet_demand / total_demand)       # in [−1, 0]
 r += 0.05 × (# zones exactly satisfied)   # up to +0.30
-r −= 2.0  × (# depots with stockout)      # 0, −2, −4, or −6
 
 if last_step and unmet == 0:
     r += 0.2                               # end-of-episode bonus
 ```
 
-**Stockout condition**: a depot has 0 inventory after distribution AND its zones' total demand was not fully met.
+The reward is driven by **unmet demand** (the fraction of total demand not served) and a small bonus for zones whose demand is exactly met. There is no depot stockout penalty — if a depot runs out of stock, the shortfall is already captured by the unmet demand term.
 
 **Invalid actions** (total exceeds CDC, allocation to a closed road, allocation exceeds depot headroom) receive `reward = −5.0`. No state is mutated and the step counter does not advance. There is **no soft road-violation penalty** — invalid road allocations are simply rejected.
 
@@ -79,7 +90,7 @@ if last_step and unmet == 0:
 
 ---
 
-## 6. Setup
+## 7. Setup
 
 ### Environment Variables
 
@@ -112,7 +123,7 @@ pytest tests/ -v
 
 ---
 
-## 7. Inference Output Format
+## 8. Inference Output Format
 
 The script emits exactly three line types to stdout:
 
@@ -134,7 +145,7 @@ The script emits exactly three line types to stdout:
 
 ---
 
-## 8. Grader Usage
+## 9. Grader Usage
 
 Run the deterministic proportional-heuristic grader on all three tasks:
 
@@ -146,7 +157,7 @@ Output is a JSON array with `task`, `total_reward`, `normalised_score`, `per_ste
 
 ---
 
-## 9. Hugging Face Space
+## 10. Hugging Face Space
 
 - The Space **must** be tagged `openenv`.
 - The Space **must** be in the `Running` state before submission.

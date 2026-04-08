@@ -1,18 +1,19 @@
 {
     "task_name": "cascading-failure",
-    "cdc_initial_inventory": 2000,
+    "cdc_initial_inventory": 1800,
+    "periodic_supply_rate": 280,
     "depot_initial_inventories": {
         "depotA": 200,
         "depotB": 200,
         "depotC": 200
     },
     "base_zone_demands": {
-        "zone1": 50,
-        "zone2": 50,
-        "zone3": 50,
-        "zone4": 50,
-        "zone5": 50,
-        "zone6": 50
+        "zone1": 60,
+        "zone2": 40,
+        "zone3": 70,
+        "zone4": 30,
+        "zone5": 55,
+        "zone6": 45
     },
     "disruption_schedule": [
         {
@@ -35,6 +36,16 @@
             "type": "cdc_inventory_cut",
             "step": 12,
             "factor": 0.5
+        },
+        {
+            "type": "cdc_resupply",
+            "step": 15,
+            "units": 600
+        },
+        {
+            "type": "cdc_resupply",
+            "step": 22,
+            "units": 400
         }
     ]
 }
