@@ -60,10 +60,15 @@ SORTED_ALLOC = sorted(VALID_ALLOC)
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
-    "You are a disaster logistics coordinator. Your job:\n"
-    "- Allocate supplies from a Central Distribution Centre (CDC) to 3 depots.\n"
-    "- Each depot automatically distributes to its zones to meet demand.\n"
-    "- Your goal: minimise unmet demand across all zones every step.\n"
+    "You are a disaster logistics coordinator optimising supply allocation.\n"
+    "Rules:\n"
+    "- Allocate supplies from CDC to 3 depots each step. Depots auto-distribute to zones.\n"
+    "- Goal: MINIMISE unmet demand. Reward = -unmet/total_demand + 0.05 per fully-satisfied zone.\n"
+    "- CRITICAL: Match allocations to depot demand. If depotB has 100 demand and depotA has 100, they need similar allocations.\n"
+    "- If a road is closed, that depot MUST get 0.\n"
+    "- React IMMEDIATELY to demand changes — increase allocation to affected depots the same step.\n"
+    "- React IMMEDIATELY to road closures/openings — redistribute to open depots.\n"
+    "- A recommended allocation is provided each step. Follow it unless you have a strong reason to deviate.\n"
     "- Output ONLY valid JSON. No explanation, no markdown, no extra text."
 )
 
@@ -81,6 +86,71 @@ def _clamp_down(value: int) -> int:
         else:
             break
     return result
+
+
+def _clamp_up(value: int) -> int:
+    """Smallest element of VALID_ALLOC that is >= *value*, or largest."""
+    for a in SORTED_ALLOC:
+        if a >= value:
+            return a
+    return SORTED_ALLOC[-1]
+
+
+def _compute_recommended_allocation(observation: Observation) -> dict[str, int]:
+    """Compute demand-proportional allocation as a recommendation to the LLM."""
+    cdc = observation.cdc_inventory
+    demands = observation.zone_demands
+    road_status = observation.road_status
+    depot_inv = observation.depot_inventories
+    remaining_steps = MAX_STEPS - observation.step
+
+    # Compute per-depot demand (only for open roads)
+    depot_demand: dict[str, int] = {}
+    for depot in DEPOTS:
+        if road_status[f"CDC->{depot}"] == "closed":
+            depot_demand[depot] = 0
+        else:
+            depot_demand[depot] = sum(
+                demands[z] for z in DEPOT_TO_ZONES[depot]
+                if road_status.get(f"{depot}->{z}") == "open"
+            )
+
+    total_demand = sum(depot_demand.values())
+    if total_demand == 0 or cdc == 0:
+        return {"depotA": 0, "depotB": 0, "depotC": 0}
+
+    # Budget: account for periodic supply over remaining steps
+    total_supply = cdc + observation.periodic_supply_rate * max(remaining_steps - 1, 0)
+    total_future_demand = total_demand * remaining_steps
+    # Allocate proportionally but don't overshoot what's needed
+    budget_this_step = min(cdc, max(total_demand, total_supply // max(remaining_steps, 1)))
+
+    allocs: dict[str, int] = {}
+    budget = budget_this_step
+    for depot in DEPOTS:
+        if depot_demand[depot] == 0:
+            allocs[depot] = 0
+            continue
+        # Proportional share
+        share = depot_demand[depot] / total_demand * budget_this_step
+        headroom = DEPOT_CAPACITY[depot] - depot_inv.get(depot, 0)
+        # Clamp up to nearest valid to better meet demand
+        clamped = _clamp_down(min(int(share + 0.5), budget, headroom))
+        allocs[depot] = clamped
+        budget -= clamped
+
+    # If we have leftover budget and depots with unmet demand, distribute more
+    if budget >= SORTED_ALLOC[1]:
+        for depot in sorted(DEPOTS, key=lambda d: depot_demand[d], reverse=True):
+            if depot_demand[depot] == 0:
+                continue
+            headroom = DEPOT_CAPACITY[depot] - depot_inv.get(depot, 0) - allocs[depot]
+            extra = _clamp_down(min(budget, headroom))
+            if extra > 0:
+                allocs[depot] += extra
+                budget -= extra
+
+    return allocs
 
 
 def _build_fallback_action(observation: Observation) -> Action:
@@ -111,8 +181,12 @@ def _build_fallback_action(observation: Observation) -> Action:
     return Action(allocations=DepotAllocations(**allocs))
 
 
-def _build_user_message(observation: Observation, task_name: str) -> str:
-    """Construct the user prompt including observation and constraints."""
+def _build_user_message(
+    observation: Observation,
+    task_name: str,
+    reward_history: list[float] | None = None,
+) -> str:
+    """Construct the user prompt including observation, constraints, and recommendation."""
     obs = observation
     depot_inv = obs.depot_inventories
     demands = obs.zone_demands
@@ -120,7 +194,6 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
     closed_depots = [
         d for d in DEPOTS if obs.road_status.get(f"CDC->{d}") == "closed"
     ]
-    open_depots = [d for d in DEPOTS if d not in closed_depots]
     closed_zone_roads = [
         edge for edge, st in obs.road_status.items()
         if st == "closed" and not edge.startswith("CDC->")
@@ -135,12 +208,11 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
         headroom = DEPOT_CAPACITY[depot] - depot_inv[depot]
         status = "CLOSED" if depot in closed_depots else "open"
         depot_summaries.append(
-            f"  - {depot} (road: {status}, inventory: {depot_inv[depot]}, "
-            f"headroom: {headroom}, zone demand: {zone_detail}, total: {total_d})"
+            f"  - {depot} (road: {status}, inv: {depot_inv[depot]}, "
+            f"headroom: {headroom}, demand: {zone_detail}, total: {total_d})"
         )
 
     remaining_steps = MAX_STEPS - obs.step
-    budget_hint = obs.cdc_inventory // remaining_steps if remaining_steps > 0 else 0
 
     pending = obs.pending_resupplies
     if pending:
@@ -150,44 +222,42 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
     else:
         resupply_lines = "none"
 
-    msg = (
-        f"STEP {obs.step} / 30  |  Task: {task_name}\n\n"
+    # Compute recommended allocation
+    rec = _compute_recommended_allocation(obs)
 
+    msg = f"STEP {obs.step} / 30  |  Task: {task_name}\n\n"
+
+    # Show recent reward feedback if available
+    if reward_history:
+        recent = reward_history[-3:]
+        trend = ", ".join(f"{r:.2f}" for r in recent)
+        msg += f"== RECENT REWARDS == {trend}\n"
+        if any(r < 0 for r in recent):
+            msg += "WARNING: Negative rewards indicate unmet demand. Increase allocations!\n"
+        msg += "\n"
+
+    msg += (
         f"== SUPPLY ==\n"
         f"- CDC inventory: {obs.cdc_inventory}\n"
-        f"- Periodic pipeline: +{obs.periodic_supply_rate} units arrive each step\n"
-        f"- Upcoming one-time deliveries: {resupply_lines}\n"
-        f"- Remaining steps: {remaining_steps}\n"
-        f"- Suggested total budget this step: ~{budget_hint}\n\n"
+        f"- Periodic pipeline: +{obs.periodic_supply_rate}/step\n"
+        f"- Upcoming deliveries: {resupply_lines}\n"
+        f"- Remaining steps: {remaining_steps}\n\n"
 
         f"== DEPOTS ==\n"
         + "\n".join(depot_summaries) + "\n\n"
 
-        f"== CONSTRAINTS (violating any → instant -5 penalty, step wasted) ==\n"
-        f"- Each depot allocation must be one of: {sorted(VALID_ALLOC)}\n"
-        f"- Sum of all allocations must be ≤ {obs.cdc_inventory} (CDC inventory)\n"
-        f"- Closed-road depots MUST get 0: {closed_depots if closed_depots else 'none currently'}\n"
-        f"- Closed depot→zone roads (zones get 0 from that depot): {closed_zone_roads if closed_zone_roads else 'none currently'}\n"
-        f"- Each depot allocation must fit within its headroom (capacity {list(DEPOT_CAPACITY.values())[0]} - current inventory)\n\n"
+        f"== CONSTRAINTS ==\n"
+        f"- Allocations must be in {sorted(VALID_ALLOC)}\n"
+        f"- Sum ≤ {obs.cdc_inventory}\n"
+        f"- Closed roads MUST get 0: {closed_depots if closed_depots else 'none'}\n"
+        f"- Closed zone roads: {closed_zone_roads if closed_zone_roads else 'none'}\n"
+        f"- Each allocation ≤ depot headroom\n\n"
 
-        f"== STRATEGY TIPS ==\n"
-        f"- Depots auto-distribute to their zones. You only control CDC→depot.\n"
-        f"- Prioritise depots whose zones have highest total demand.\n"
-        f"- Supply is tight. Plan ahead — budget ≈ demand + small buffer.\n"
-        f"- Upcoming deliveries replenish CDC; pre-position before surges.\n\n"
-    )
+        f'== RECOMMENDED == {{"allocations":{{"depotA":{rec["depotA"]},"depotB":{rec["depotB"]},"depotC":{rec["depotC"]}}}}}\n'
+        f"Use this unless you have a specific reason to deviate.\n\n"
 
-    # Few-shot example for non-easy tasks
-    if task_name in ("demand-spike", "cascading-failure"):
-        msg += (
-            "== EXAMPLE (when CDC->depotB is closed) ==\n"
-            '{"allocations":{"depotA":200,"depotB":0,"depotC":200}}\n\n'
-        )
-
-    msg += (
-        "== YOUR RESPONSE ==\n"
-        "Output ONLY this JSON (no text around it):\n"
-        '{"allocations":{"depotA":<int>,"depotB":<int>,"depotC":<int>}}'
+        f"== RESPONSE (JSON only) ==\n"
+        f'{{"allocations":{{"depotA":<int>,"depotB":<int>,"depotC":<int>}}}}'
     )
     return msg
 
@@ -218,16 +288,23 @@ def _sanitize_action(observation: Observation, raw_allocs: dict[str, int]) -> Ac
     return Action(allocations=DepotAllocations(**allocs))
 
 
-def _call_llm(observation: Observation, task_name: str) -> Action:
+def _call_llm(
+    observation: Observation,
+    task_name: str,
+    reward_history: list[float] | None = None,
+) -> Action:
     """Call the LLM and parse its response into an Action, with fallback."""
     try:
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": _build_user_message(observation, task_name)},
+                {
+                    "role": "user",
+                    "content": _build_user_message(observation, task_name, reward_history),
+                },
             ],
-            max_tokens=256,
+            max_tokens=128,
             temperature=0,
         )
         raw = response.choices[0].message.content.strip()
@@ -246,7 +323,9 @@ def _call_llm(observation: Observation, task_name: str) -> Action:
         }
         return _sanitize_action(observation, raw_allocs)
     except Exception:
-        return _build_fallback_action(observation)
+        # Fallback: use the recommendation directly
+        rec = _compute_recommended_allocation(observation)
+        return _sanitize_action(observation, rec)
 
 
 def _compact_action(action: Action) -> str:
@@ -284,7 +363,7 @@ def run_episode(task: str) -> None:
             if done:
                 break
 
-            action = _call_llm(obs, task)
+            action = _call_llm(obs, task, rewards if rewards else None)
             result = env.step(action)
 
             obs = result.observation
