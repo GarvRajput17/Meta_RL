@@ -43,11 +43,18 @@ def health() -> dict:
     return {"status": "ok", "env": "open-supply-chain-env"}
 
 
+TASK_FILE_MAP: dict[str, str] = {
+    "static-baseline": "task1",
+    "demand-spike": "task2",
+    "cascading-failure": "task3",
+}
+
 @app.post("/reset")
 def reset(body: Optional[ResetRequest] = None) -> dict:
     req_body = body or ResetRequest()
+    internal_task = TASK_FILE_MAP.get(req_body.task, req_body.task)
     try:
-        obs = env.reset(req_body.task)
+        obs = env.reset(internal_task)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
     return obs.model_dump()
