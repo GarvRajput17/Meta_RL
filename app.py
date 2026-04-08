@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ValidationError
 
@@ -21,7 +22,7 @@ env = SupplyChainEnv(tasks_dir="tasks")
 # ---------------------------------------------------------------------------
 
 class ResetRequest(BaseModel):
-    task: str
+    task: Optional[str] = "static-baseline"
 
 
 class StepRequest(BaseModel):
@@ -43,9 +44,10 @@ def health() -> dict:
 
 
 @app.post("/reset")
-def reset(body: ResetRequest) -> dict:
+def reset(body: Optional[ResetRequest] = None) -> dict:
+    req_body = body or ResetRequest()
     try:
-        obs = env.reset(body.task)
+        obs = env.reset(req_body.task)
     except (FileNotFoundError, ValueError) as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
     return obs.model_dump()
