@@ -133,21 +133,16 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
             f"headroom: {headroom}, zone demand: {zone_detail}, total: {total_d})"
         )
 
-    pending = obs.pending_resupplies
-    if pending:
-        resupply_lines = "\n".join(
-            f"  - Step {r['step']}: +{r['units']} units" for r in pending
-        )
-    else:
-        resupply_lines = "  - none"
+    remaining_steps = MAX_STEPS - obs.step
+    budget_hint = obs.cdc_inventory // remaining_steps if remaining_steps > 0 else 0
 
     msg = (
         f"STEP {obs.step} / 30  |  Task: {task_name}\n\n"
 
         f"== SUPPLY ==\n"
         f"- CDC inventory: {obs.cdc_inventory}\n"
-        f"- Periodic resupply: +250 units arrive each step automatically\n"
-        f"- Scheduled one-time deliveries:\n{resupply_lines}\n\n"
+        f"- Remaining steps: {remaining_steps}\n"
+        f"- Suggested total budget this step: ~{budget_hint}\n\n"
 
         f"== DEPOTS ==\n"
         + "\n".join(depot_summaries) + "\n\n"
@@ -161,8 +156,7 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
         f"== STRATEGY TIPS ==\n"
         f"- Depots auto-distribute to their zones. You only control CDC→depot.\n"
         f"- Prioritise depots whose zones have highest total demand.\n"
-        f"- Don't hoard CDC — unmet demand is penalised every step.\n"
-        f"- If a big resupply is coming soon, you can afford to spend more now.\n\n"
+        f"- Spread CDC across all 30 steps — don't spend it all early.\n\n"
     )
 
     # Few-shot example for non-easy tasks
@@ -178,6 +172,32 @@ def _build_user_message(observation: Observation, task_name: str) -> str:
         '{"allocations":{"depotA":<int>,"depotB":<int>,"depotC":<int>}}'
     )
     return msg
+
+
+def _sanitize_action(observation: Observation, raw_allocs: dict[str, int]) -> Action:
+    """Clamp LLM-proposed allocations so they never violate any constraint."""
+    cdc = observation.cdc_inventory
+    road_status = observation.road_status
+    depot_inv = observation.depot_inventories
+
+    allocs: dict[str, int] = {}
+    for depot in DEPOTS:
+        proposed = max(0, raw_allocs.get(depot, 0))
+        if road_status.get(f"CDC->{depot}") == "closed":
+            allocs[depot] = 0
+            continue
+        headroom = DEPOT_CAPACITY[depot] - depot_inv.get(depot, 0)
+        allocs[depot] = _clamp_down(min(proposed, headroom))
+
+    total = sum(allocs.values())
+    if total > cdc:
+        for depot in sorted(DEPOTS, key=lambda d: allocs[d], reverse=True):
+            while allocs[depot] > 0 and sum(allocs.values()) > cdc:
+                current = allocs[depot]
+                lower = [v for v in SORTED_ALLOC if v < current]
+                allocs[depot] = lower[-1] if lower else 0
+
+    return Action(allocations=DepotAllocations(**allocs))
 
 
 def _call_llm(observation: Observation, task_name: str) -> Action:
@@ -201,14 +221,12 @@ def _call_llm(observation: Observation, task_name: str) -> Action:
             raw = "\n".join(lines).strip()
 
         data = json.loads(raw)
-        action = Action(
-            allocations=DepotAllocations(
-                depotA=int(data["allocations"]["depotA"]),
-                depotB=int(data["allocations"]["depotB"]),
-                depotC=int(data["allocations"]["depotC"]),
-            )
-        )
-        return action
+        raw_allocs = {
+            "depotA": int(data["allocations"]["depotA"]),
+            "depotB": int(data["allocations"]["depotB"]),
+            "depotC": int(data["allocations"]["depotC"]),
+        }
+        return _sanitize_action(observation, raw_allocs)
     except Exception:
         return _build_fallback_action(observation)
 
