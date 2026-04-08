@@ -30,7 +30,12 @@ from env.supply_chain_env import (
     VALID_ALLOC,
     ZONES,
 )
-from graders.graders import compute_normalised_score
+
+SUCCESS_SCORE_THRESHOLD = 0.5
+
+
+def safe_score(val: float) -> float:
+    return max(1e-6, min(val, 1 - 1e-6))
 
 
 # ---------------------------------------------------------------------------
@@ -443,13 +448,20 @@ def run_episode(task: str) -> None:
         success = False
     finally:
         env.close()
-        total_reward = sum(rewards)
-        score = compute_normalised_score(total_reward)
-        rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+        
+        # Calculate raw score as per suggestion
+        raw_score = sum(rewards) / len(rewards) if rewards else 0.0
+        score = max(1e-6, min(raw_score, 1 - 1e-6))
+        
+        # Assign success based on the new threshold definition if it didn't crash
+        if success:
+            success = score >= SUCCESS_SCORE_THRESHOLD
+            
+        rewards_str = ",".join(f"{safe_score(r):.2f}" for r in rewards)
+        
         print(
             f"[END] success={'true' if success else 'false'} "
             f"steps={steps_taken} "
-            f"score={score:.3f} "
             f"rewards={rewards_str}"
         )
 
