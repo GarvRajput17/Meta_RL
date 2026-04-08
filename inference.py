@@ -27,6 +27,8 @@ from env.supply_chain_env import (
     SupplyChainEnv,
     VALID_ALLOC,
 )
+from graders.graders import compute_normalised_score
+
 
 # ---------------------------------------------------------------------------
 # Environment variables
@@ -289,10 +291,13 @@ def run_episode(task: str) -> None:
         success = False
     finally:
         env.close()
+        total_reward = sum(rewards)
+        score = compute_normalised_score(total_reward)
         rewards_str = ",".join(f"{r:.2f}" for r in rewards)
         print(
             f"[END] success={'true' if success else 'false'} "
             f"steps={steps_taken} "
+            f"score={score:.3f} "
             f"rewards={rewards_str}"
         )
 
