@@ -1,0 +1,18 @@
+{
+    "task_name": "static-baseline",
+    "cdc_initial_inventory": 2000,
+    "depot_initial_inventories": {
+        "depotA": 200,
+        "depotB": 200,
+        "depotC": 200
+    },
+    "base_zone_demands": {
+        "zone1": 50,
+        "zone2": 50,
+        "zone3": 50,
+        "zone4": 50,
+        "zone5": 50,
+        "zone6": 50
+    },
+    "disruption_schedule": []
+}

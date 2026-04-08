@@ -1,0 +1,25 @@
+name: open-supply-chain-env
+version: "1.0.0"
+description: "Single-agent LLM-driven disaster resource allocation environment"
+author: "Team QQuant"
+tasks:
+  - name: static-baseline
+    file: task1
+    difficulty: easy
+  - name: demand-spike
+    file: task2
+    difficulty: medium
+  - name: cascading-failure
+    file: task3
+    difficulty: hard
+api:
+  reset: POST /reset
+  step: POST /step
+  state: GET /state
+entry_point: inference.py
+tags:
+  - openenv
+requires:
+  - API_BASE_URL
+  - MODEL_NAME
+  - HF_TOKEN
