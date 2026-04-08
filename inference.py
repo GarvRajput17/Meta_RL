@@ -4,16 +4,20 @@ Root-level inference script for OpenSupplyChainEnv.
 Reads API_BASE_URL, MODEL_NAME, HF_TOKEN from environment variables.
 Uses the OpenAI Python client for all LLM calls.
 Emits exact [START]/[STEP]/[END] stdout format required by OpenEnv.
+
+STDOUT FORMAT:
+    [START] task=<task_name> env=<benchmark> model=<model_name>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<score> rewards=<r1,r2,...,rn>
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
 import time
-from typing import Any
+from typing import Any, List, Optional
 
 from openai import OpenAI, RateLimitError
 
@@ -33,13 +37,8 @@ from env.supply_chain_env import (
 
 SUCCESS_SCORE_THRESHOLD = 0.5
 
-
-def safe_score(val: float) -> float:
-    return max(0.01, min(val, 0.99))
-
-
 # ---------------------------------------------------------------------------
-# Environment variables
+# Environment variables (MANDATORY per guidelines)
 # ---------------------------------------------------------------------------
 
 API_BASE_URL: str = os.getenv("API_BASE_URL", "https://api.groq.com/openai/v1")
@@ -61,10 +60,40 @@ TASK_FILE_MAP: dict[str, str] = {
     "cascading-failure": "task3",
 }
 
+# All tasks to run (at least 3 with graders required)
+ALL_TASKS: list[str] = ["static-baseline", "demand-spike", "cascading-failure"]
+
+BENCHMARK = "open-supply-chain-env"
+
 SORTED_ALLOC = sorted(VALID_ALLOC)
 
 # ---------------------------------------------------------------------------
-# System prompt (exact)
+# Logging helpers (exact stdout format per spec)
+# ---------------------------------------------------------------------------
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(step: int, action: str, reward: float, done: bool, error: Optional[str]) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# System prompt
 # ---------------------------------------------------------------------------
 
 SYSTEM_PROMPT = (
@@ -76,7 +105,7 @@ SYSTEM_PROMPT = (
     "4. When demands change or roads close/open, IMMEDIATELY adjust your allocation that same step.\n"
     "5. If your last reward was negative, your allocation was WRONG. Change it NOW.\n\n"
     "REWARD: -unmet/total_demand + 0.05 per fully-satisfied zone. Maximize by matching supply to demand.\n\n"
-    "Output ONLY valid JSON: {\"allocations\":{\"depotA\":<int>,\"depotB\":<int>,\"depotC\":<int>}}\n"
+    'Output ONLY valid JSON: {"allocations":{"depotA":<int>,"depotB":<int>,"depotC":<int>}}\n'
     "Values must be in {0, 50, 100, 200, 400}. Sum must not exceed CDC inventory."
 )
 
@@ -394,6 +423,11 @@ def _format_error(info: dict[str, Any]) -> str:
     return str(err)
 
 
+def _safe_score(raw: float) -> float:
+    """Clamp score to strictly within (0, 1) — never exactly 0.0 or 1.0."""
+    return max(0.01, min(raw, 0.99))
+
+
 # ---------------------------------------------------------------------------
 # Episode runner
 # ---------------------------------------------------------------------------
@@ -410,7 +444,7 @@ def run_episode(task: str) -> None:
 
     try:
         obs = env.reset(task_file)
-        print(f"[START] task={task} env=open-supply-chain-env model={MODEL_NAME}")
+        log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
 
         done = False
         prev_obs: Observation | None = None
@@ -436,53 +470,56 @@ def run_episode(task: str) -> None:
             action_str = _compact_action(action)
             error_str = _format_error(result.info)
 
-            print(
-                f"[STEP] step={step_num} "
-                f"action={action_str} "
-                f"reward={result.reward:.2f} "
-                f"done={'true' if done else 'false'} "
-                f"error={error_str}"
+            log_step(
+                step=step_num,
+                action=action_str,
+                reward=result.reward,
+                done=done,
+                error=error_str,
             )
 
     except Exception:
         success = False
     finally:
         env.close()
-        
-        # Calculate raw score as per suggestion
+
+        # Calculate raw score (average reward normalized to [0,1])
         raw_score = sum(rewards) / len(rewards) if rewards else 0.0
-        score = max(1e-6, min(raw_score, 1 - 1e-6))
-        
-        # Assign success based on the new threshold definition if it didn't crash
+        # Normalize: reward range is roughly [-1, 0.5], map to [0, 1]
+        normalized = (raw_score + 1.0) / 1.5
+        # Clamp strictly to (0, 1) — NEVER exactly 0.0 or 1.0
+        score = _safe_score(normalized)
+
+        # Assign success
         if success:
             success = score >= SUCCESS_SCORE_THRESHOLD
-            
-        rewards_str = ",".join(f"{r:.2f}" for r in rewards)
-        
-        print(
-            f"[END] success={'true' if success else 'false'} "
-            f"steps={steps_taken} "
-            f"score={score:.3f} "
-            f"rewards={rewards_str}",
-            flush=True,
+
+        log_end(
+            success=success,
+            steps=steps_taken,
+            score=score,
+            rewards=rewards,
         )
 
 
 # ---------------------------------------------------------------------------
-# CLI
+# CLI — runs ALL tasks by default (required: at least 3 tasks with graders)
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import argparse
+
     parser = argparse.ArgumentParser(description="OpenSupplyChainEnv inference")
     parser.add_argument(
         "--task",
-        choices=["static-baseline", "demand-spike", "cascading-failure"],
-        default="static-baseline",
-    )
-    parser.add_argument(
-        "--demo-mode",
-        action="store_true",
-        help="Accepted silently and ignored.",
+        choices=["static-baseline", "demand-spike", "cascading-failure", "all"],
+        default="all",
+        help="Which task to run. Default 'all' runs all 3 tasks.",
     )
     args = parser.parse_args()
-    run_episode(args.task)
+
+    if args.task == "all":
+        for task in ALL_TASKS:
+            run_episode(task)
+    else:
+        run_episode(args.task)

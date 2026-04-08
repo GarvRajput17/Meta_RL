@@ -9,10 +9,16 @@ from pydantic import BaseModel, ValidationError
 from env.supply_chain_env import (
     Action,
     DepotAllocations,
+    Observation,
+    StepResult,
     SupplyChainEnv,
 )
 
-app = FastAPI(title="OpenSupplyChainEnv", version="1.0.0")
+app = FastAPI(
+    title="OpenSupplyChainEnv",
+    version="1.0.0",
+    description="Single-agent LLM-driven disaster resource allocation environment",
+)
 
 env = SupplyChainEnv(tasks_dir="tasks")
 
@@ -40,7 +46,43 @@ def root() -> dict:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok", "env": "open-supply-chain-env"}
+    return {"status": "healthy", "service": "open-supply-chain-env"}
+
+
+@app.get("/metadata")
+def metadata() -> dict:
+    return {
+        "name": "open-supply-chain-env",
+        "description": "Single-agent LLM-driven disaster resource allocation environment",
+        "version": "1.0.0",
+        "author": "Team QQuant",
+        "tasks": [
+            {"name": "static-baseline", "difficulty": "easy"},
+            {"name": "demand-spike", "difficulty": "medium"},
+            {"name": "cascading-failure", "difficulty": "hard"},
+        ],
+    }
+
+
+@app.get("/schema")
+def schema() -> dict:
+    return {
+        "action": Action.model_json_schema(),
+        "observation": Observation.model_json_schema(),
+        "state": {
+            "type": "object",
+            "properties": {
+                "cdc_inventory": {"type": "integer"},
+                "periodic_supply_rate": {"type": "integer"},
+                "depot_inventories": {"type": "object"},
+                "zone_demands": {"type": "object"},
+                "road_status": {"type": "object"},
+                "step": {"type": "integer"},
+                "task_name": {"type": "string"},
+                "episode_rewards": {"type": "array"},
+            },
+        },
+    }
 
 
 TASK_FILE_MAP: dict[str, str] = {
