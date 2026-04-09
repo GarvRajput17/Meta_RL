@@ -1,3 +1,14 @@
+---
+title: Open Supply Chain Env
+emoji: 📦
+colorFrom: blue
+colorTo: green
+sdk: docker
+app_port: 7860
+tags:
+  - openenv
+---
+
 # Open Supply Chain Environment
 
 **Team QQuant** — Aaryan Antala, Nirbhay Sharma, Garv Grez (IIIT Bangalore)
